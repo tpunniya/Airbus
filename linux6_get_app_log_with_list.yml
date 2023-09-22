@@ -1,0 +1,106 @@
+---
+- name: "Copy sshpass to server if OS is lesser than RH7"
+  copy:
+    src: "files/sshpass_rh6"
+    dest: "/tmp/"
+    owner: root
+    mode: 0540
+
+- name: "define FILERMOUNTER from FILER country"
+  set_fact:
+    FILERMOUNTER: "{{ 'fr0-viaas-3357.eu.airbus.corp' if ( FILER is search ('fr0')) else 'de0-viaas-280.eu.airbus.corp'}}"
+
+- name: "mount {{FILER}} on {{FILERMOUNTER}}"
+  mount:
+    path: "{{mount_point}}"
+    fstype: cifs
+    src: "{{FILER}}"
+    # use file for credential and force uid for mount
+    opts: "vers=3.0,credentials=/root/2L22.cred,iocharset=utf8,uid=153921"
+    state: mounted
+  delegate_to: "{{ FILERMOUNTER }}"
+  vars:
+    ansible_ssh_user: '{{ RH7USR }}'
+    ansible_ssh_pass: '{{ RH7PWD }}'
+    ansible_become: yes
+    ansible_become_method: sudo
+    ansible_become_user: root
+    ansible_become_password: '{{ RH7PWD }}'
+
+- name: "Create Directory on Filer"
+  file:
+    path: "{{mount_point}}/{{ RITM }}"
+    state: directory
+  delegate_to: "{{ FILERMOUNTER }}"
+  vars:
+    ansible_ssh_user: '{{ RH7USR }}'
+    ansible_ssh_pass: '{{ RH7PWD }}'
+    ansible_become: no
+
+- name: "Find {{ USER }} SID for ACL rights"
+  win_shell: "(New-Object System.Security.Principal.NTAccount('{{USER}}@eu.airbus.corp')).Translate([System.Security.Principal.SecurityIdentifier]).value"
+  register: ID
+  vars:
+    ansible_become: no
+    ansible_user : '{{ lookup("env", "ANSIBLE_NET_USERNAME") }}'
+    ansible_password: '{{ lookup("env", "ANSIBLE_NET_PASSWORD") }}'
+  delegate_to: fr0-viaas-604.eu.airbus.corp
+
+- name: "Add {{ USER }} allow rights on directory"
+  shell: "/bin/setcifsacl -a 'ACL:{{ ID.stdout|trim }}:ALLOWED/OI|CI/FULL' {{mount_point}}/{{ RITM }}"
+  delegate_to: "{{ FILERMOUNTER }}"
+  vars:
+    ansible_ssh_user: '{{ RH7USR }}'
+    ansible_ssh_pass: '{{ RH7PWD }}'
+    ansible_become: no
+
+- name: "Find SID for ACL rights for a list of users"
+  win_shell: "(New-Object System.Security.Principal.NTAccount('{{item | trim }}@eu.airbus.corp')).Translate([System.Security.Principal.SecurityIdentifier]).value"
+  register: LIST_IDS
+  with_items: "{{ LIST_USERS }}"
+  vars:
+    ansible_become: no
+    ansible_user : '{{ lookup("env", "ANSIBLE_NET_USERNAME") }}'
+    ansible_password: '{{ lookup("env", "ANSIBLE_NET_PASSWORD") }}'
+  delegate_to: fr0-viaas-604.eu.airbus.corp
+  ignore_errors: yes
+  when: LIST_USERS|length|int > 0
+
+- name: "Add rights on directory for a list of users"
+  shell: "/bin/setcifsacl -a 'ACL:{{ item.stdout|trim }}:ALLOWED/OI|CI/FULL' {{mount_point}}/{{ RITM }}"
+  with_items: "{{ LIST_IDS.results }}"
+  loop_control:
+    label: ""
+  delegate_to: "{{ FILERMOUNTER }}"
+  vars:
+    ansible_become: no
+    ansible_ssh_user: '{{ RH7USR }}'
+    ansible_ssh_pass: '{{ RH7PWD }}'
+  ignore_errors: yes
+  register: R_USERS
+  when: LIST_USERS|length|int > 0
+
+- name: "warning if all users cannot got rights"
+  set_fact:
+    MSG_USERS: "WARNING: some USERS haven t right on the share"
+  when: LIST_USERS|length|int > 0 and R_USERS.failed is defined and  R_USERS.failed == true
+
+- name: "Copy Log files on Filer with scp"
+  shell: "/tmp/sshpass_rh6 -v -e scp -o StrictHostKeyChecking=no {{LOG|trim}} {{RH7USR}}@{{FILERMOUNTER}}:{{mount_point}}/{{RITM}}/"
+  environment:
+    SSHPASS: '{{ RH7PWD }}'
+
+- name: "Umount Filer {{FILER}} on {{FILERMOUNTER}}"
+  mount:
+    path: "{{mount_point}}"
+    fstype: cifs
+    src: "{{FILER}}"
+    state: absent
+  delegate_to: "{{ FILERMOUNTER }}"
+  vars:
+    ansible_ssh_user: '{{ RH7USR }}'
+    ansible_ssh_pass: '{{ RH7PWD }}'
+    ansible_become: yes
+    ansible_become_method: sudo
+    ansible_become_user: root
+    ansible_become_password: '{{ RH7PWD }}'
